@@ -1,0 +1,643 @@
+---
+title: "DC_Residential_Property"
+author: "Chirag Jhamb, Danlei Qian, Gaofeng HUANG, Xi Zhang"
+date: "2/25/2019"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r basicfcn, include=F}
+# can add quietly=T option to the require() function
+loadPkg = function(x) { if (!require(x,character.only=T, quietly =T)) { install.packages(x,dep=T,repos="http://cran.us.r-project.org"); if(!require(x,character.only=T)) stop("Package not found") } }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r init, include=F}
+options(scipen = 8, digits = 2)
+loadPkg("tidyr")
+loadPkg("ggplot2")
+loadPkg("corrplot")
+loadPkg("faraway") # contains the vif function
+loadPkg("leaps")
+loadPkg("ISLR")
+loadPkg("pastecs")
+```
+
+```{r readdata,include=FALSE}
+rawrp <- read.csv("./data/DC_Properties.csv")
+```
+
+# Chapter 1: Introduction
+Most of people care about the price of residential properties. Washington D.C. is the capital of the US. It is interesting to take a view at the price of DC residential properties. Intuitively, DC is a city that has faced one of the highest price level in the US. Generally, in 2017, the population in DC was nearly 700,000 and the average price of a single family was approximately 649,000. In this report, we aim to find what factors influence the price significantly.  
+
+# Chapter 2: Data Description
+##2.1 Data Source
+Link: https://www.kaggle.com/christophercorrea/dc-residential-properties  
+The main source of our data is a csv file in kaggle, which is the 7th version updated in July 2018.  
+Link: https://data.worldbank.org/indicator/fp.cpi.totl.zg  
+Another dataset about inflation is a csv file in World Bank Open Data, which is updated in January 2019.
+
+##2.2 Dataset
+This dataset has 49 variables including price. Apart from price, these variables can be divided into four groups: attributes of house itself, time related factors, assessment of third party, and location. For the full name of these variables, these infomation is introduced in detail in https://www.kaggle.com/christophercorrea/dc-residential-properties.
+```{r variables}
+#str(rawrp)
+names(rawrp)
+```
+
+##2.3 Data Preprocessing and Cleaning
+For the time part, we convert the date format (dd/mm/yyyy) into year format (yyyy) and then calculate the time span. For example, the time span of the building (SPAN_AYB) is from the year the structure was first built to the last date of sale. Similar for the time span of the year remodeled (SPAN_YR_RMDL) and the time span of an improvement was built (SPAN_EYB). Then, we can use these time spans numerically. We also set a new variable that is price per square foot, which is a common-use measurement.
+
+###2.3.1 Cleaning Redundant Variables
+There are so many redundant variables, such as latitude & longitude and X & Y. In this report, we ignore nearly half of the variables here.
+```{r presetting}
+prerp <- rawrp[-c(1,18,28,30:36,38:40,44,46:48)]
+prerp$SALE_YR <- as.integer(format(as.Date(prerp$SALEDATE),'%Y'))
+prerp$SPAN_YR_RMDL <- prerp$SALE_YR - prerp$YR_RMDL
+prerp$SPAN_AYB <- prerp$SALE_YR - prerp$AYB
+prerp$SPAN_EYB <- prerp$SALE_YR - prerp$EYB
+#names(prerp)
+
+prerp <- prerp[-c(8:10,12)]
+
+prerp$BATHRM <- prerp$BATHRM + 0.5*prerp$HF_BATHRM
+prerp <- prerp[-c(2)]
+
+prerp$SALE_NUM <- as.factor(prerp$SALE_NUM)
+
+
+prerp$PRICE_GBA <- prerp$PRICE/prerp$GBA
+
+names(prerp)
+```
+
+###2.3.2 Omit NA
+Following, we only select the complete data to use. One thing should be noted, the factor variable air conditioner (AC) has three levels: 0, N, Y. Hereby, "0" means the data is not available, which is the same as NA. As a result, we narrow the dataset down from 150k rows to 33k rows.
+```{r omitNA}
+nrow(prerp)
+levels(prerp[,3])[1] <- NA #AC = "0" is NA
+prerp <- na.omit(prerp)
+#prerp <- prerp[!is.na(prerp$PRICE_GBA),]
+nrow(prerp)
+```
+
+###2.3.3 How to remove outliers? OutlierKD function?
+We have finished the basic cleaning, but it is still a problem to see some extreme outliers. If we trivially use the outlierKD function w.r.t price to remove the outliers, we will find the upperbound of the housing price is only 1,000,000 USD. From the common knowledge, we know the average housing price in DC is over 600k USD and there are so many properties sold over 1,000,000 USD. Additonally, from the plot of price or price per square foot (scrolling down to see), these data is highly skewed to the right. Thus, using outlierKD function may remove too many useful data on the right and too little on the left.  
+
+Therefore we use this following method to remove more outliers on the left than the right, with 5% and 0.1% respectively. Although this approach is not very accurate and well-proved, it is still reasonable comparing to outlierKD function.
+```{r datacleaning, fig.height=6, fig.width=15}
+p_lowerbound <- sort(prerp$PRICE_GBA)[nrow(prerp)*0.05] # impossible PRICE_GBA <= 80
+p_upperbound <- sort(prerp$PRICE_GBA)[nrow(prerp)*0.999] # still possible >= 1000
+r_lowerbound <- sort(prerp$ROOMS)[nrow(prerp)*0.001]
+r_upperbound <- sort(prerp$ROOMS)[nrow(prerp)*0.999]
+rp <- subset(prerp, PRICE_GBA >= p_lowerbound & PRICE_GBA <= p_upperbound & ROOMS >= r_lowerbound & ROOMS <= r_upperbound & KITCHENS <= 4)
+
+rp_num <- data.frame(sapply(rp, as.numeric)) # for correlation part
+```
+
+There are the extreme cases if we do not clean the outliers. One impossible instance is price is only 1 USD with 7 rooms. Besides, we also do not care about the luxury properties in this report.
+```{r price_extremecase}
+price_extreme <- subset(prerp, PRICE_GBA <= p_lowerbound | PRICE_GBA >= p_upperbound)
+subset(price_extreme, PRICE_GBA <= 1 | PRICE_GBA >= 3000) #very extreme cases
+```
+
+We can compare the differences of the distribution between the within outliers and without outliers.  
+Within outliers:
+```{r plotp_pre, fig.height=6}
+boxplot(prerp$PRICE, ylab='PRICE')
+boxplot(prerp$PRICE_GBA, ylab='PRICE_GBA')
+```
+
+Without outliers:
+```{r plotp,fig.height=6}
+boxplot(rp$PRICE,ylab='PRICE')
+boxplot(rp$PRICE_GBA,ylab='PRICE_GBA')
+```
+
+```{r outlierKD, echo=F}
+outlierKD <- function(dt, var) { 
+     var_name <- eval(substitute(var),eval(dt))
+     na1 <- sum(is.na(var_name))
+     m1 <- mean(var_name, na.rm = T)
+     par(mfrow=c(2, 2), oma=c(0,0,3,0))
+     boxplot(var_name, main="With outliers")
+     hist(var_name, main="With outliers", xlab=NA, ylab=NA)
+     outlier <- boxplot.stats(var_name)$out
+     mo <- mean(outlier)
+     var_name <- ifelse(var_name %in% outlier, NA, var_name)
+     boxplot(var_name, main="Without outliers")
+     hist(var_name, main="Without outliers", xlab=NA, ylab=NA)
+     title("Outlier Check", outer=TRUE)
+     na2 <- sum(is.na(var_name))
+     cat("Outliers identified:", na2 - na1, "n")
+     cat("Propotion (%) of outliers:", round((na2 - na1) / sum(!is.na(var_name))*100, 1), "n")
+     cat("Mean of the outliers:", round(mo, 2), "n")
+     m2 <- mean(var_name, na.rm = T)
+     cat("Mean without removing outliers:", round(m1, 2), "n")
+     cat("Mean if we remove outliers:", round(m2, 2), "n")
+     response <- readline(prompt="Do you want to remove outliers and to replace with NA? [yes/no]: ")
+     if(response == "y" | response == "yes"){
+          dt[as.character(substitute(var))] <- invisible(var_name)
+          assign(as.character(as.list(match.call())$dt), dt, envir = .GlobalEnv)
+          cat("Outliers successfully removed", "n")
+          return(invisible(dt))
+     } else{
+          cat("Nothing changed", "n")
+          return(invisible(var_name))
+     }
+}
+```
+
+###2.3.5 Cleaning outliers again
+From the plot above, although the plot is more reasonable after the first outliers cleaning, we still want to make the distribution looks like normal distribution. At this step, we call the outlierKD function and it removes the outliers with the upperbound over 1,600,000 USD. Also, it is better to do statistical inference with the normal distributed data.
+```{r remove_outlier, fig.height=8,fig.width=12}
+outlierKD(rp, PRICE)
+rp <- na.omit(rp)
+```
+
+
+##2.4 Correlation
+Now we try to draw a (Pearson) correlation matrix among these variables. Before that, we assume these variables are numeric.  
+It is obvious to see that price is highly positive related to the gross building area and some other attributes about rooms, which is consistent with our prior knowledge.
+```{r corr, fig.height=15, fig.width=15}
+rp_corr <- cor(rp_num)
+corrplot(rp_corr, method = "square")
+```
+
+##2.5 Summary of Statistics
+After clearning all the data, we take a view at the basic statistics about this new dataset we will use in the report. In this dataset, the mean price is 611,350 USD, which is closed to value calculated by other authorities. The mean area is 1668 square feet. Besides, the median price and area is a little bit lower than the mean values. As for the deviation, it is quite large that the standard deviations are approximately half of the mean values both for price and area.
+```{r stat}
+stat_rp <- stat.desc(rp)
+show_stat <- stat_rp[sapply(stat_rp, is.numeric)]
+show_stat
+```
+
+##2.6 Find the best model
+###2.6.1 Numeric model
+For the numeric dataset, we generate the best linear model for price with 12 maximal number of variables. We have used three information criteria but all of these criteria have the same result. Thus, we only show the plot of "Adjusted R^2". Without considering some variables are factor, the most significant variables are gross building area (GBA), date of sale (YR_SALE), number of fireplaces (FIREPLACES), time span of building (SPAN_AYB), time span of an improvement (SPAN_EYB), number of units (NUM_UNITS), heating system (HEAT), qualification (QUALIFIED), and population of a particular district (CENSUS_TRACT). i.e. PRICE ~ BATHRM + NUM_UNITS + GBA + FIREPLACES + QUALIFIED + CENSUS_TRACT + SALE_YR + SPAN_AYB + SPAN_EYB.
+```{r bestmodel_num_price,fig.width=15, fig.height=10}
+rp_num_best <- regsubsets(PRICE~. -PRICE_GBA-ZIPCODE, data = rp_num, method = "seqrep", nvmax = 12)
+plot(rp_num_best, scale = "adjr2", main = "Adjusted R^2")
+# In the "leaps" package, we can use scale=c("bic","Cp","adjr2","r2")
+#plot(rp_num_best, scale = "bic", main = "BIC")
+#plot(rp_num_best, scale = "Cp", main = "Cp")
+```
+
+```{r bestmodel_price,fig.width=40, fig.height=8, include=FALSE}
+#rp_best <- regsubsets(PRICE~.-PRICE_GBA, data = rp, method = "seqrep", nvmax = 25)
+#plot(rp_best, scale = "adjr2", main = "Adjusted R^2")
+# In the "leaps" package, we can use scale=c("bic","Cp","adjr2","r2")
+#plot(rp_best, scale = "bic", main = "BIC")
+#plot(rp_best, scale = "Cp", main = "Cp")
+```
+
+Similar for the best linear model for price per area, we obtain the model with different variables: PRICE_GBA ~ BEDRM (number of bedrooms) + QUALIFIED + GRADE (assessment by other authorities) + CNDTN (condition assessed by public) + FIREPLACES + WARD (eight different districts divided in DC) + SALE_YR + SPAN_AYB + SPAN_EYB. Acctually, we prefer the model w.r.t price per area and we will prove it in the analysis of the later SMART questions.
+```{r bestmodel_num_pricegba,fig.width=15, fig.height=10}
+rp_num_best <- regsubsets(PRICE_GBA~.-PRICE-GBA-ZIPCODE, data = rp_num, method = "seqrep", nvmax = 12)
+plot(rp_num_best, scale = "adjr2", main = "Adjusted R^2")
+# In the "leaps" package, we can use scale=c("bic","Cp","adjr2","r2")
+#plot(rp_num_best, scale = "bic", main = "BIC")
+#plot(rp_num_best, scale = "Cp", main = "Cp")
+```
+
+```{r bestmodel_pricegba,fig.width=30, fig.height=10, include=FALSE}
+#rp_best <- regsubsets(PRICE_GBA~.-PRICE-GBA, data = rp, method = "seqrep", nvmax = 25)
+#plot(rp_best, scale = "adjr2", main = "Adjusted R^2")
+# In the "leaps" package, we can use scale=c("bic","Cp","adjr2","r2")
+#plot(rp_best, scale = "bic", main = "BIC")
+#plot(rp_best, scale = "Cp", main = "Cp")
+```
+
+Recall the linear regression model for price and for price per area. All the coefficents of variables are very significant and the regression model fits the data moderately well (with adj. R^2 = 0.693 and 0.567 respectively).
+```{r reg_rp_num_best}
+reg_rp_num <- lm(PRICE ~ BATHRM + NUM_UNITS + GBA + FIREPLACES + QUALIFIED + CENSUS_TRACT + SALE_YR + SPAN_AYB + SPAN_EYB, data = rp_num)
+summary(reg_rp_num)
+vif(reg_rp_num)
+```
+
+```{r reg_rp_num_pg_best}
+#rp_num$SALE_YR <- rp_num$SALE_YR - min(rp_num$SALE_YR) #find the reg. result is same
+reg_rp_num_pg <- lm(PRICE_GBA ~ BEDRM + QUALIFIED + GRADE + CNDTN + FIREPLACES + WARD + SALE_YR + SPAN_AYB + SPAN_EYB, data = rp_num)
+summary(reg_rp_num_pg)
+vif(reg_rp_num_pg)
+```
+
+###2.6.2 Model with factor variables
+The previous model is still based on the assumption of numeric variables. We just trivially try the same model in the raw variables. Although it may not be the best model, this model still has some reference value for analyzing the best linear model.  
+It should be noted that the best linear model for price per area fits the data better while the model for price fits the data worse. It is one of the reasons that we prefer to use the measurement of price per area here.  
+According the VIF values, all of these models have very low VIF values, which means it is not significant these models have the problem of multicolinearity.
+```{r reg_rp_best}
+reg_rp <- lm(PRICE ~ NUM_UNITS + GBA + FIREPLACES + CENSUS_TRACT + SALE_YR + SPAN_AYB + SPAN_EYB, data = rp)
+summary(reg_rp)
+vif(reg_rp)
+```
+
+```{r reg_rp_pg_best}
+reg_rp_pg <- lm(PRICE_GBA ~ BEDRM + QUALIFIED + GRADE + CNDTN + FIREPLACES + WARD + SALE_YR + SPAN_AYB + SPAN_EYB, data = rp)
+summary(reg_rp_pg)
+vif(reg_rp_pg)
+```
+
+#Chapter 3: SMART Questions
+Our report has 4 aspects of SMART Questions: about floor plan, about location, about time related factors, about facilities.  
+
+##3.1 SMART Questions about Floor Plan & Area
+Generally, the floor plan is the most important element to attract home buyers. Therefore, it must be tightly related to the price. In this part, we will research the correlation between price and variables that are related to the floor plan.
+
+###3.1.1 How does floor plan affect price?
+We filter three factors from cleaned data that are the number of bathrooms(BATHRM), the number of bedrooms(BEDRM) and the number of the kitchen(KITCHENS). According to the correlation plot, we will have an overview of the correlation between price and there three factors. Basically, it shows the bathroom tightly relates to price and the kitchen has the weakest correlation. We will figure out the reason in the next steps.
+
+```{r Area}
+fp_corr <- cor(rp_num[c(1,6,19,8)])
+corrplot(fp_corr, method = "square")
+```
+
+Since the number of kitchens looks weakly affected to price, we build two linear regression models to figure out the relationship between price and kitchen.
+
+```{r}
+fpmd <- lm(PRICE ~ BATHRM + BEDRM + KITCHENS , data = rp_num)
+summary(fpmd)
+vif(fpmd)
+```
+In this reference model, all of the coefficients are significant. Adjusted R-squared is 0.356 and vif test doesn't show multicollinearity.
+```{r model without kitchen}
+fpmdnokc <- lm(PRICE ~ BATHRM + BEDRM, data = rp_num)
+summary(fpmdnokc)
+vif(fpmdnokc)
+```
+```{r fp_anova, fig.height=5,fig.width=10}
+boxplot(rp$PRICE~rp$BEDRM, col=topo.colors(20))
+boxplot(rp$PRICE~rp$KITCHENS, col=topo.colors(6))
+anova(fpmd, fpmdnokc)
+
+```
+After removing KITCHENS, coefficients are still significant, vif test also doesn't illustrate multicollinearity. However, the Adjusted R-square decreases and the ANOVA test shows the importance of kitchen to the model. These means KITCHENS can improve the model but is not strongly related to price. I guess the reason is that the scale of the number of kitchens is narrow, thus the effect of the kitchen hardly reflects to price.
+
+
+###3.1.2 Find the price of your dream house.
+In this part, we want to have some interaction between speaker and audiences in our presentation, so we would invite a volunteer to tell us how many bathrooms, bedrooms, and kitchens he/she want for his/her dream house in DC.
+```{r}
+Price_filter <- rp_num[rp_num$BATHRM== 4 & rp_num$BEDRM==4 & rp_num$KITCHENS == 1,]
+```
+
+Based on the overview of properties in DC, we also want this volunteer to guess the price of his/her dream house. We use the t-test to show if he/she is a good guesser.
+For example, this audience set 300000 USD at an expected price. In our t-test, we assume the mean = 300000 as our null hypothesis. Then we could get the p-value to measure if his/her guessed number is close to the truth in 0.99 confidence level.
+```{r t-test}
+
+ttest99 = t.test(x=Price_filter$PRICE, mu=300000, conf.level=0.99 )
+ttest99
+ttest99$conf.int
+ttest99$alternative
+ttest99$estimate
+```
+
+The box plot and summary indicate that even though people can purchase a house on the minimum price, they may not get a perfect one. Nobody wants to live in an extremely narrow house with a lot of rooms.Area is a key factor to measure a dream house(This is a bridge to transit to Area part).
+```{r price range of your dream house}
+boxplot(Price_filter$PRICE)
+summary(Price_filter$PRICE)
+```
+
+
+##3.1.3 How do area and landarea influence price?
+
+According to this scatter plot. Gross building area (GBA) is positively related to price.
+We color the scatter dots by 'Landarea'. Since the color distributes irregularly. It reflects 'Landarea' may not affect the price.
+The sharp edges are due to data cleaning.
+```{r scatter for areas}
+plot(rp_num$PRICE,rp_num$GBA,col=rp_num$LANDAREA, main = 'GBA-Price(Colored by Landarea)', xlab = 'Price', ylab = 'GBA')
+plot(rp_num$PRICE,rp_num$LANDAREA, main = 'Landarea-Price', xlab = 'Price', ylab = 'Landarea')
+```
+
+We want to prove if land area is not related to price. Thus we first draw a scatter plot for land area and price. This plot doesn't show any regular correlation between them.
+We also draw Q-Q plots for the GBA and Land area. These plots illustrate that are not normally distributed.
+```{r landarea}
+qqnorm(rp_num$LANDAREA, main = "Landarea Q-Q Plot") 
+qqline(rp_num$LANDAREA)
+qqnorm(rp_num$GBA, main = "GBA Q-Q Plot") 
+qqline(rp_num$GBA)
+area_corr <- cor(rp_num[c('LANDAREA','GBA','PRICE')])
+corrplot(area_corr, method = "square")
+```
+
+The correlation plot shows it is related to price, but we finally want to use linear regression models and ANOVA test to determine their relationship.
+According to the ANOVA test, it's easy to see the land area doesn't affect price because the p-value is pretty large when we add land area into the model. It means Model 1 and Model 2 are the same.
+Also, the R-Squares in lm_GBA and lm_GBA_LANDAREA are almost same but lmLANDAREA is pretty small, which support us to make a conclusion: the land area is not a key element to change the price.
+```{r vif}
+lm_GBA_LANDAREA <- lm(formula = PRICE ~ LANDAREA + GBA , data = rp_num)
+lm_GBA <- lm(formula = PRICE ~ GBA , data = rp_num)
+lm_LANDAREA<- lm(formula = PRICE ~ LANDAREA, data = rp_num)
+#summary(lm_GBA)
+#summary(lm_GBA_LANDAREA)
+#summary(lm_LANDAREA)
+
+
+anova(lm_GBA, lm_GBA_LANDAREA, lm_LANDAREA)
+
+
+```
+
+
+##3.2 SMART Questions about Location
+
+Let's study the affect of location on prices. DC has different wards. Let's see if prices are equally distributed among all wards.
+
+```{r}
+loadPkg("ggmap")
+data <- read.csv("./data/DC_Properties.csv")
+data <- data[!is.na(data$PRICE),]    #removing rows with no price
+
+# Location/Ward importance to the price?
+wards <- vector()
+q1_wards <- vector()
+q3_wards <- vector()
+max_wards <- vector()
+avg_wards <- vector()
+#names(wards) <- list(unique(data$WARD))
+
+for (i in sort((unique(data$WARD)))){
+  max_wards[[i]] <- max(subset(data,WARD==i)$PRICE)
+  avg_wards[[i]] <- mean(subset(data,WARD==i)$PRICE)
+  wards[[i]] <- list(sort(list(subset(data,WARD==i)$PRICE)[[1]]))
+  q1_wards[[i]] <- quantile(wards[[i]][[1]], seq(from = 0, to = 1, by = 0.25))[[2]]
+  q3_wards[[i]] <- quantile(wards[[i]][[1]], seq(from = 0, to = 1, by = 0.25))[[4]]
+}
+
+barplot(avg_wards)
+lines(q1_wards)
+lines(q3_wards)
+```
+Ward location does affect house pricing. Houses in ward 3 are obviously more expensive than the rest. Let's check if any other location based factors affect the prices too. Each house is on a different floor. We should see if floors affect the pricing just like wards.
+
+```{r}
+stor <- vector()
+avg_stor <- vector()
+
+for (i in (unique(data$STYLE))){
+  avg_stor[[i]] <- mean(subset(data,STYLE==i)$PRICE)
+  stor[[i]] <- list(sort(list(subset(data,STYLE==i)$PRICE)[[1]]))
+  
+}
+barplot(order(unlist(avg_stor)), horiz = FALSE, names.arg=sort(names(avg_stor)))
+```
+Relatively, there is no specific floor which gives the house a higher price like ward does. Let's analyse each and every ward of DC. Diving the house prices of each ward into quantiles and then visualising will tell us if the distrubution is truly location based or some other factors are affecting the prices.
+
+```{r}
+register_google(key = "AIzaSyAhGGV1_J9ipBAsF6vE7fg56zjDy_uaCvA")   #to be kept private
+#plot all wards to see ward location
+qmap_name <- "Washington dc"
+dc <-qmap(qmap_name, zoom=12,maptype = "terrain")
+data2 <- data[!is.na(data$WARD),]
+
+dc <- dc + geom_point(aes(x = LONGITUDE, y = LATITUDE, colour = WARD),data = data2) + ggtitle("DC WARDS")
+
+print(dc)
+
+```
+
+```{r}
+wards <- vector()
+
+for (i in sort((unique(data$WARD)))){
+  cat(i)
+  wards[[i]] <- list(sort(list(subset(data,WARD==i)$PRICE)[[1]]))
+  q1 <- quantile(wards[[i]][[1]], seq(from = 0, to = 1, by = 0.25))[[2]]
+  q2 <- quantile(wards[[i]][[1]], seq(from = 0, to = 1, by = 0.25))[[3]]
+  q3 <- quantile(wards[[i]][[1]], seq(from = 0, to = 1, by = 0.25))[[4]]
+  
+  data2 <- subset(data,WARD==i)
+  
+  data2$Quantile[data2$PRICE > q3] <- "4"
+  data2$Quantile[data2$PRICE < q3] <- "3"
+  data2$Quantile[data2$PRICE < q2] <- "2"
+  data2$Quantile[data2$PRICE < q1] <- "1"
+  data2 <- data2[!is.na(data2$Quantile),] 
+  qmap_name <- paste(c(i ,", washington dc"), collapse = "")
+  dc <-qmap(qmap_name, zoom=15)
+  dc <- dc + geom_point(aes(x = LONGITUDE, y = LATITUDE, colour = Quantile),data = data2) + ggtitle(i)
+  
+  #png(filename= paste(c(i,".png"), collapse = ""))
+  print(dc)
+  #dev.off()
+}
+```
+## Ward 2: 
+Some of the most expensive houses are locaated in this ward. Almost all houses have high range, which means average value of houses in general might be less due to some houses in this ward due to other factors but overall the price is high.
+## Ward 3: 
+Almost all houses are expensive. Any house in this ward will have a high price. This means prices here are affected more by the location than any other factor.
+## Ward 5, 7 and 8: 
+These areas in DC have equal distribution from affordable houses to expensive ones. In such cases, location plays minor role and other factors such as land area are more important.
+
+The other factors mentioned could be time. Which is why time analysis is important. Sell date of a house coupled with inflation could tell us a lot more. Let's analyse price on basis of when the house was sold.
+
+```{r}
+get_year <- function(x){
+  return(as.numeric(substring(x,0,4)))
+}
+sold_price <- vector()
+sold_num <- vector()
+data2 <- data[!is.na(data$SALEDATE),]
+data2$sell_year <- get_year(data2$SALEDATE)
+data2 <- data2[!is.na(data2$sell_year),]
+data2 <- subset(data2,sell_year>1990)
+#sapply(data2$sell_year, numeric)
+for (i in sort(unique(data2$sell_year))){
+  data3 <- subset(data2,sell_year==i)
+  sold_num[[as.character(i)]] <- nrow(data3)
+  sold_price[[as.character(i)]] <- mean(data3$PRICE)
+}
+
+plot(sold_num, type = "s", xaxt="n")
+options(scipen=20)
+axis(1,at=1:length(unique(data2$sell_year)),labels=names(sold_num))
+```
+(Further analysis of time/sell year in 3.3.2)
+
+##3.3 SMART Questions about Time Related Factors
+###3.3.1 SMART Question: What's the depreciation rate of price with sale number?
+At the beginning, we wonder that the price will be affected by the sale number. For example, at the first sale, the price may be higher than the second sale of one particular property.  
+In the following result of regression, we find that the coefficients has a decreasing trend (except the first sale) when the sale number goes up, which is exactly what we expected at the beginning.
+```{r}
+lm_sn <- lm(PRICE ~ SALE_NUM, data = rp)
+summary(lm_sn)
+```
+
+Then we draw a boxplot to show the trend. Excluding the first sale, the mean of housing price goes down as sale time goes up and the deviation also tends to decrease. Why the first sale is so strange? It is reasonable that there are too many properties only have one time of sale so that there are a lot of unhealthy data engaged in this part. Why there are downward trends of mean and deviation? If the price of the real estate is steady in DC (Steady? It will be discussed later), the price of used properties are more like to sale at a lower price and the interval of the price setting will be narrowed down.  
+```{r, fig.height=6,fig.width=10}
+rp$SALE_NUM <- as.numeric(rp$SALE_NUM)
+#sn_lowerbound <- sort(rp$SALE_NUM)[nrow(rp)*0.05]
+sn_upperbound <- sort(rp$SALE_NUM)[nrow(rp)*0.999]
+
+rp_sn <- subset(rp, SALE_NUM <= sn_upperbound)
+rp$SALE_NUM <- as.factor(rp$SALE_NUM)
+rp_sn$SALE_NUM <- as.factor(rp_sn$SALE_NUM)
+plot(data=rp_sn,PRICE~SALE_NUM, log='y', col = topo.colors(10))
+#plot(data=rp,PRICE_GBA~STRUCT, col = topo.colors(10))
+#plot(data=rp,PRICE~ROOMS)
+```
+
+```{r sn_regline, include=FALSE}
+#dep <- lm(PRICE_GBA ~ SALE_NUM, data = rp_sn)
+#summary(dep)
+##vif(dep)
+#plot(PRICE_GBA ~ SALE_NUM, rp_sn, col = topo.colors(10))
+#abline(dep,col=2)
+```
+
+Also, we are interested in the place in which properties have a high sale number. Most of these properties have a good assessment by others, which means these properties are very popular. Besides, most of them are located in the old city so that it is reasonable to sale out many times.
+```{r find_sn_high_area}
+sn_area <- subset(rp, as.numeric(SALE_NUM) >= 10)
+sn_area
+```
+
+Back to the correlation analysis, it seems that sale number do not have a negative relation with the price or price per area. As we mentioned above, most of the properties are sold out only one time and the mean value is quite low with sale number = 1. Correlation coefficients only explain the general relation based on all the data. Therefore, this correlation is not contradictory to our previous analysis.
+```{r corr_sn_yr}
+#sn_ayn <- lm(SPAN_AYB ~ SALE_NUM, data = rp_sn)
+#summary(sn_ayn)
+#plot(data = rp_sn, SPAN_AYB ~ SALE_NUM)
+#names(rp)
+corr_sn <- rp[c(10,28,8,32)]
+corr_sn$SALE_NUM <- as.numeric(corr_sn$SALE_NUM)
+corrplot.mixed(cor(corr_sn))
+```
+
+###3.3.2 SMART Question: Is the price of properties steady in DC during 1992 to 2017?
+We assumed that the price of properties is steady in DC in the previous question. Based on the inflation rate provided by World Bank, we generate an expectation housing price line with the baseline of average housing price in 1992. To be noticed, we use price per area to make the plot more readable. 
+```{r yeartrend, fig.height=6, fig.width=10}
+inf <- read.csv("./data/inflation.csv",skip = 3)
+inf_us <- subset(inf, Country.Name == 'United States')[c(37:62)]
+year_order <- rp[order(rp$SALE_YR),]
+yeartrend <- aggregate(year_order$PRICE_GBA, list(year_order$SALE_YR), mean)
+
+fit_inf_line <- gather((inf_us+100)/100) #convert variables into one column named 'key'
+fit_inf_line$key <- c(1992:2017)
+yeartrend <- yeartrend[c(2:27),] #data in 1991 looks unusual
+#create a PRICE/GBA line based on inflation from 1992 to 2017
+fit_inf_line$value[1] <- yeartrend$x[1]
+for (i in c(2:length(fit_inf_line$value))){
+  fit_inf_line$value[i] <- fit_inf_line$value[i-1]*fit_inf_line$value[i]
+}
+
+plot(yeartrend, type='b',col='navyblue', xlab='Year', ylab='Price/GBA') %>%
+  lines(x=fit_inf_line$key,y=fit_inf_line$value, type='b', col='orange')
+legend('topleft', legend=c("fact", "expected with inflation"), col=c("navyblue", "orange"), lty=1:1, box.lty = 0, cex=1.2)
+```
+
+In order to figure out the growth of housing price and inflation are different, we first use the variance test and get that they have different varirance. Then, due to the different variance, we apply the Welch two sample t-test and obtain that the growth of housing price is significantly different from the inflation rate.  
+Thus, according to the line chart above, we find the average housing price in DC grows approximately twice as fast as the inflation rate. In fact, comparing to other countries and cities, this growth rate is quite steady because the inflation rate of the US is steady in the recent 25 years, which is around 3%.
+```{r testdiff}
+var.test(yeartrend$x, fit_inf_line$value) #variance test, then get diff.var
+t.test(yeartrend$x, fit_inf_line$value, var.equal = F) #two sample t-test with diff.var
+```
+
+```{r test_for_corr_reg, include=FALSE}
+#test <- matrix(data = c(1:15,5:1,10:6,15:11,1,1,1,1,1,2,2,2,2,2,3,3,3,3,3),nrow=15)
+
+#test <- data.frame(test)
+##test$X3 <- as.factor(test$X3)
+#plot(x=test$X2,y=test$X1)
+#plot(x=test$X3,y=test$X2)
+#lm_test <- lm(X1 ~ X2 + X3,data = test)
+#lm_test2 <- lm(X1 ~ X3,data = test)
+##vif(lm_test)
+#summary(lm_test)
+#summary(lm_test2)
+#corr_test <- cor(test)
+#corrplot.mixed(corr_test)
+```
+
+
+##3.4 SMART Questions about Facilities
+In this part, we explored the relationship between the internal facilities and the price, mainly focusing on two parts: the heating and cooling facilites. By the way, in our dataset, AC (the air conditioner) represents the cooling facilities and the heat represents the heating facilities.
+
+First, since the variables of AC and HEAT are characters, we use 'table()' function to count the frequency of different types in the two variables. As shown below, HEAT has 14 levels indicating 14 types of heaters while AC has only 2 levels indicating whether propeties have or don't have the air conditioners.
+```{r include=TRUE}
+names(rp)
+temp_price<- rp[c(2,3,8,12)]
+temp_price_n<- rp_num[c(2,3,8,12)]
+
+temp_price[is.null(temp_price)]<-"0"
+str(temp_price)
+
+table(temp_price$HEAT)
+table(temp_price$AC)
+
+length(table(temp_price$HEAT))
+length(table(temp_price$STYLE))
+```
+
+We draw a correlation matrix of the sub-dataset to show the correlation between cooling facilities, heating facilites and the properties'price.It??s very clear the price of shows a relative high correlation with the heating and cooling facilities.
+```{r include=TRUE,fig.height=6}
+temp_price_corr <- cor(rp_num[c('HEAT','AC','PRICE')])
+corrplot(temp_price_corr, method = "square")
+```
+
+##3.4.1 SMART Question: Does heating facilities have effect on price? 
+First, from the aspect of heating facilites, we use bar chart to reflect the using frequency of different types of heaters. We can see forced air, hot water rad and warm cool are used most.
+
+```{r include=TRUE,fig.height=6,fig.width=8}
+HEAT_freq<-as.data.frame(table(temp_price$HEAT))
+names(HEAT_freq)<-c("Types","Frequence")
+
+ggplot(data=HEAT_freq, mapping=aes(x=Types,y=Frequence))+
+geom_bar(stat="identity",size=50,fill="#D55E00")+coord_flip()
+```
+
+When it comes to the relationship between heating facilities and price, we use the Analysis of Variance (ANOVA). It's clear that the p-value is quite small, we can say the heating facilities do have effects on the price.
+```{r include=TRUE,fig.height=8,fig.width=20}
+HEAT <- subset(rp, select=c('PRICE','HEAT'))
+aov_p_h <- aov(PRICE~HEAT, data=HEAT)
+aov_p_h 
+summary(aov_p_h)
+```
+
+Since there are so many types of heaters, we may wonder whether differen types of heaters have different effects on the price.From boxplot, we can see the price of some types shows a larger or smaller scope such as Air Exchng and Evp Cool, but the price of the three types used most-forced air, hot water rad and warm cool- show the similar medium and scope, which indicate people may not really care about what types of heaters in your house as long as it is warm enough.
+```{r include=TRUE,fig.height=12}
+plot(PRICE~HEAT, data=HEAT,col=topo.colors(20))
+
+```
+
+##3.4.2 SMART Question:Does cooling facilities have effect on price? 
+As for cooling systems, we only have information of yes or no. As the bar chart shows, most residiential properties do have the cooling systems(air conditioners).
+```{r include=TRUE,fig.height=6,fig.width=4}
+AC_freq<-as.data.frame(table(temp_price$AC))
+names(AC_freq)<-c("YN","Frequence")
+
+ggplot(data=AC_freq, mapping=aes(x=YN,y=Frequence))+
+geom_bar(stat="identity",width=0.4,fill="#D55E00")
+
+```
+
+###Boxplot the price with or without AC(air conditioner).
+We use the boxplot to compare the price when properties with or without cooling systems(air conditioners). As shown below, we can see the price shows a whole ascending trend from no to yes, which can be concluded that the cooling systems(air conditioners) do have effects on the price of residitial properties.
+```{r include=TRUE,fig.height=6}
+plot(x=rp$AC,y=rp$PRICE,log="y")
+
+```
+
+To prove the relationship between price and cooling facilities, We also use the Analysis of Variance (ANOVA), the p-value is quite small, we can say the cooling facilities(air conditioners) do have significant effects on price as well.
+```{r include=TRUE,fig.height=6}
+AC = subset(rp, PRICE>0, select=c('PRICE','AC'))
+aov_p_c = aov(PRICE~AC, data=AC)
+aov_p_c 
+summary(aov_p_c)
+```
+
+Furthermore, we use T-test to prove it. We set the null hypothesis as whether properties have or have no air conditioners, the means of the price are equal.And we set the alternative hypothesis as when properties have or have no air conditioners , the means of the price equal are not equal.Besides, we construct t-intervals at 0.999 level. As the result shows below, the P-value is less than 0.001, so we reject that the price of properties with or without  have the same mean values. So air conditioners do have effects on price.
+```{r include=TRUE}
+AC_Y<-subset(rp_num,AC==2)
+AC_N<-subset(rp_num,AC==1)
+t.test(AC_Y$PRICE, mu = mean(AC_N$PRICE), conf.level = 0.99)
+```
+
+
+
+#Chapter 4: Conclusion
+In conclusion, we realize that data cleaning is a very important step for data analysis. Before our SMART questions, we've spent a lot time in data preprocessing and cleaning. If we take a look at this clean-out data, they are very unhealthy and may lead our analysis to the wrong directions. For the conlusion of SMART Questions: we find gross building area is a significant factor to decide the price of an property; It is significant that certain areas (ward 2&3) have higher housing price in DC; growth rate of the housing price is twice than the inflation rate during the recent 25 years, nevertheless, it is still a steady rate; As for the facilities in the properties, both cooling and heating affect price, but types of heating do not matter to the price.
